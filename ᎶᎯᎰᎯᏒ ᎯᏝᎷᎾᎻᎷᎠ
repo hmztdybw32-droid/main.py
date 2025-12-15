@@ -1,0 +1,136 @@
+import sqlite3
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+TOKEN = "PUT_YOUR_BOT_TOKEN"
+ADMIN_ID = 123456789
+BOT_USERNAME = "YOUR_BOT_USERNAME"
+CHANNEL_USERNAME = "@yourchannel"
+
+# ===== DATABASE =====
+conn = sqlite3.connect("users.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    referred INTEGER DEFAULT 0
+)
+""")
+conn.commit()
+
+def get_user(user_id):
+    cursor.execute("SELECT balance, referred FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "INSERT INTO users (user_id, balance, referred) VALUES (?, 0, 0)",
+            (user_id,)
+        )
+        conn.commit()
+        return {"balance": 0, "referred": 0}
+    return {"balance": row[0], "referred": row[1]}
+
+def update_balance(user_id, amount):
+    cursor.execute(
+        "UPDATE users SET balance = balance + ? WHERE user_id=?",
+        (amount, user_id)
+    )
+    conn.commit()
+
+def set_referred(user_id):
+    cursor.execute(
+        "UPDATE users SET referred = 1 WHERE user_id=?",
+        (user_id,)
+    )
+    conn.commit()
+
+def reset_balance(user_id):
+    cursor.execute(
+        "UPDATE users SET balance = 0 WHERE user_id=?",
+        (user_id,)
+    )
+    conn.commit()
+
+waiting_withdraw = {}
+
+# ===== BOT =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+
+    if context.args and not user["referred"]:
+        try:
+            ref_id = int(context.args[0])
+            if ref_id != user_id:
+                get_user(ref_id)
+                update_balance(ref_id, 5)
+                set_referred(user_id)
+        except:
+            pass
+
+    keyboard = [
+        ["💰 رصيدي", "📋 مهمات"],
+        ["👥 إحالة", "💸 سحب"]
+    ]
+
+    await update.message.reply_text(
+        "أهلاً بك 👋\nبوت ربح بسيط (نقاط)",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    user = get_user(user_id)
+
+    if user_id in waiting_withdraw:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"📤 طلب سحب\n"
+            f"👤 ID: {user_id}\n"
+            f"💰 الرصيد: {user['balance']}\n"
+            f"📩 وسيلة الدفع:\n{text}"
+        )
+        await update.message.reply_text("✅ تم إرسال طلب السحب")
+        reset_balance(user_id)
+        waiting_withdraw.pop(user_id)
+        return
+
+    if text == "💰 رصيدي":
+        await update.message.reply_text(f"رصيدك: {user['balance']} نقطة")
+
+    elif text == "👥 إحالة":
+        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+        await update.message.reply_text(
+            f"رابط الإحالة:\n{link}\n+5 نقاط لكل إحالة"
+        )
+
+    elif text == "📋 مهمات":
+        await update.message.reply_text(
+            f"📌 مهمة:\nاشترك بالقناة {CHANNEL_USERNAME}\n"
+            f"ثم اكتب: تحقق"
+        )
+
+    elif text == "تحقق":
+        member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            update_balance(user_id, 3)
+            await update.message.reply_text("✅ تم التحقق +3 نقاط")
+        else:
+            await update.message.reply_text("❌ لم تشترك بعد")
+
+    elif text == "💸 سحب":
+        if user["balance"] < 20:
+            await update.message.reply_text("❌ الحد الأدنى للسحب 20 نقطة")
+        else:
+            waiting_withdraw[user_id] = True
+            await update.message.reply_text(
+                "✍️ أرسل وسيلة الدفع (USDT / Payeer / Vodafone)"
+            )
+
+# ===== RUN =====
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+app.run_polling()
